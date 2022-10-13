@@ -1,4 +1,4 @@
-# Wave-U-Net-for-Speech-Enhancement
+# C-T-F-DCNet: Deformable Convolutional Speech Enhancement Network with Channel-Time-Frequency Attention Module, submitted to ICASSP 2023
 
 Implement [C-T-F-DCNet: Deformable Convolutional Speech Enhancement Network with Channel-Time-Frequency Attention Module] by PyTorch
 ![](./doc/tensorboard.png)
