@@ -5,72 +5,129 @@ import numpy as np
 from model.deformable.deform_conv import th_batch_map_offsets, th_generate_grid
 from model.DCCRN.ConvSTFT import ConvSTFT, ConviSTFT 
 
+
+
 class C_T_F_Attention(nn.Module):
-    def __init__(
-        self,
-        dim1,
-        dropout = 0.5,
-    ):
-        super().__init__()
+    def __init__(self, channel = 256, time = 251, frequency = 7, num_heads=1):
+        super(C_T_F_Attention, self).__init__()
+        self.num_heads = num_heads
+##################################################################################################################
+        self.q_conv_c = nn.Conv1d(time, time, kernel_size=1, bias=False)
+        self.q_bn_c = nn.BatchNorm1d(time)
+		
+        self.k_conv_c = nn.Conv1d(time, time, kernel_size=1, bias=False)
+        self.k_bn_c = nn.BatchNorm1d(time)
+		
+        self.logits_bn_c = nn.BatchNorm2d(1)
+##################################################################################################################
+        self.q_conv_f = nn.Conv1d(channel, channel, kernel_size=1, bias=False)
+        self.q_bn_f = nn.BatchNorm1d(channel)
 
-        self.g = nn.Sequential(
-            nn.Conv1d(256, 256, kernel_size=1),
-            nn.BatchNorm1d(256))	
-			
-        self.a = nn.Sequential(
-            nn.Conv1d(251, 251, kernel_size=1),
-            nn.BatchNorm1d(251))	
-			
-        self.b = nn.Sequential(
-            nn.Conv1d(7, 7, kernel_size=1),
-            nn.BatchNorm1d(7))	
-			
-        self.o = nn.Sequential(
-            nn.Conv2d(dim1, dim1, kernel_size=(1, 1)),
-            nn.BatchNorm2d(dim1))		
+        self.k_conv_f = nn.Conv1d(channel, channel, kernel_size=1, bias=False)
+        self.k_bn_f = nn.BatchNorm1d(channel)
 
-        self.o1 = nn.Sequential(
-            nn.Conv2d(dim1, dim1, kernel_size=(1, 1)),
-            nn.BatchNorm2d(dim1))
-			
-        self.softmax = nn.Softmax(dim=-1)        
-        self.dropout = nn.Dropout(dropout)
+        self.logits_bn_f = nn.BatchNorm2d(1)
+##################################################################################################################
+        self.q_conv_t = nn.Conv1d(channel, channel, kernel_size=1, bias=False)
+        self.q_bn_t = nn.BatchNorm1d(channel)
 
+        self.k_conv_t = nn.Conv1d(channel, channel, kernel_size=1, bias=False)
+        self.k_bn_t = nn.BatchNorm1d(channel)
+
+        self.logits_bn_t = nn.BatchNorm2d(1)
+##################################################################################################################
+        self.v_conv = nn.Conv2d(channel, channel, kernel_size=(1, 1))
+        self.v_bn = nn.BatchNorm2d(channel)
+		
+		
     def forward(self, x):
- 
-        b, c, w, j = x.size()
+
+        x_c = x.permute(0, 2, 3, 1)  # batch_size, width, depth, height
+        #print(x_c.size())
+        x_f = x.permute(0, 2, 1, 3)
+        #print(x_f.size())
+        x_t = x.permute(0, 3, 1, 2)        
+        #print(x_t.size())		
+
+
+#########################################for channel#######################################################
+            
+        batch_size, width, depth, height = x_c.size()# 1 x 7 x 251 x 256
+        x_c = x_c.reshape(batch_size * width, depth, height) # 7 x 251 x 256
+
+        q_c = self.q_bn_c(self.q_conv_c(x_c))
+        k_c = self.k_bn_c(self.k_conv_c(x_c))
+
+        k_c = k_c.unsqueeze(1)
+        q_c = q_c.unsqueeze(1)
+
+
+        k_c = F.adaptive_avg_pool2d(k_c, (1, 256)).squeeze(-1)
+        q_c = F.adaptive_avg_pool2d(q_c, (1, 256)).squeeze(-1)	
+    
+
+        qk_c = torch.matmul(q_c.transpose(2, 3), k_c)
+
+        logits_c = self.logits_bn_c(qk_c) # apply batch normalization on qk, qr, kr
+        
+        weights_c = F.softmax(logits_c, dim=3) # 7 x 1 x 256 x 256
+
+###########################################for frequency#####################################################
+        batch_size, width, depth, height = x_f.size() # 1 x 7 x 256 x 251
+        x_f = x_f.reshape(batch_size * width, depth, height) # 7 x 256 x 251
+
+        q_f = self.q_bn_f(self.q_conv_f(x_f)) # 7 x 256 x 251
+        k_f = self.k_bn_f(self.k_conv_f(x_f)) # 7 x 256 x 251
+
+        k_f = k_f.unsqueeze(1) # 7 x 1 x 256 x 251
+        q_f = q_f.unsqueeze(1) # 7 x 1 x 256 x 251
+
+        k_f = F.adaptive_avg_pool2d(k_f, (1, 251)).squeeze(-1) # 7 x 1 x 1 x 251
+        q_f = F.adaptive_avg_pool2d(q_f, (1, 251)).squeeze(-1) # 7 x 1 x 1 x 251
+
+        qk_f = torch.matmul(q_f.transpose(2, 3), k_f)  # 7 x 1 x 251 x 251
+
+        logits_f = self.logits_bn_f(qk_f) # 7 x 1 x 251 x 251
+
+        weights_f = F.softmax(logits_f, dim=3) # 
+
+
+#############################################for time########################################################
+        batch_size, width, depth, height = x_t.size() # 1 x 251 x 256 x 7
+        x_t = x_t.reshape(batch_size * width, depth, height) # 251 x 256 x 7
+
+        q_t = self.q_bn_t(self.q_conv_t(x_t)) # 251 x 256 x 7
+        k_t = self.k_bn_t(self.k_conv_t(x_t)) # 251 x 256 x 7
+
+        k_t = k_t.unsqueeze(1) # 251 x 1 x 256 x 7
+        q_t = q_t.unsqueeze(1) # 251 x 1 x 256 x 7
+
+        k_t = F.adaptive_avg_pool2d(k_t, (1, 7)).squeeze(-1) # 251 x 1 x 1 x 7
+        q_t = F.adaptive_avg_pool2d(q_t, (1, 7)).squeeze(-1) # 251 x 1 x 1 x 7	
+
+        qk_t = torch.matmul(q_t.transpose(2, 3), k_t)  # 251 x 1 x 7 x 7
+
+        logits_t = self.logits_bn_t(qk_t) # 251 x 1 x 7 x 7
+
+        weights_t = F.softmax(logits_t, dim=3)
+
+##################################################################################################################
+        v = self.v_bn(self.v_conv(x)) # 1 x 256 x 7 x 251
+        #print(v.size())
+        weights_c = weights_c.squeeze(1)
+        #print(weights_c.size())
+        weights_f = weights_f.squeeze(1)
+        #print(weights_f.size())
+        weights_t = weights_t.squeeze(1)
+        #print(weights_t.size())
 		
-        t = x.reshape(b*w,c,j)
-        f = x.reshape(b*j,c,w)
+        v_c = torch.einsum('bhxy,ihh->bhxy', v, weights_c)
+        v_f = torch.einsum('bhxy,iyy->bhxy', v, weights_f)
+        v_t = torch.einsum('bhxy,jxx->bhxy', v, weights_t)		
+        output = v_t + v_c + v_f + x
 
+        return output
 
-        x_c = x.mean(-1).mean(-1).unsqueeze(-1)
-        x_t = x.mean(1).mean(1).unsqueeze(-1)		
-        x_f = x.mean(1).mean(-1).unsqueeze(-1)		
-        ##########for channel axis#############
-        q_c = self.g(x_c)
-        k_c = self.g(x_c)
-        atten_c = self.softmax(torch.matmul(q_c, k_c.permute(0, 2, 1))).unsqueeze(1) # B x C x C
-
-        ###########for time axis###############		
-        q_t = self.a(x_t)
-        k_t = self.a(x_t)
-        atten_t = self.softmax(torch.matmul(q_t, k_t.permute(0, 2, 1))).unsqueeze(1) # B x T x T
-		
-        ###########for frequency axis###############		
-        q_f = self.b(x_f)
-        k_f = self.b(x_f)
-        atten_f = self.softmax(torch.matmul(q_f, k_f.permute(0, 2, 1))).unsqueeze(1) # B x F x F
-	
-        #############################################
-        v = self.o(x)
-
-
-        v_t = torch.matmul(v, atten_t)
-        v_f = torch.matmul(v_t.permute(0, 1, 3, 2), atten_f).permute(0, 1, 3, 2)
-        v_c = torch.matmul(v_t.permute(0, 3, 2, 1), atten_c).permute(0, 3, 2, 1)
-        xn = self.o1(v_c) + x
-        return xn
 
 class ConvOffset2D(nn.Conv2d):
     """ConvOffset2D
@@ -171,7 +228,7 @@ class NonCausalConvBlock1(nn.Module):
             padding=(0, 1)
         )
         self.norm = nn.BatchNorm2d(num_features=out_channels)
-        self.activation = nn.ELU()
+        self.activation = nn.ReLU()
 
     def forward(self, x):
         """
@@ -191,7 +248,14 @@ class NonCausalConvBlock(nn.Module):
     def __init__(self, in_channels, out_channels):
         super().__init__()
         self.offset = ConvOffset2D(in_channels)
-        self.conv = nn.Conv2d(
+        self.conv1 = nn.Conv2d(
+            in_channels=in_channels,
+            out_channels=out_channels,
+            kernel_size=(3, 2),
+            stride=(2, 1),
+            padding=(0, 1)
+        )
+        self.conv2 = nn.Conv2d(
             in_channels=in_channels,
             out_channels=out_channels,
             kernel_size=(3, 2),
@@ -199,8 +263,8 @@ class NonCausalConvBlock(nn.Module):
             padding=(0, 1)
         )
         self.norm = nn.BatchNorm2d(num_features=out_channels)
-        self.activation = nn.ELU()
-
+        self.activation = nn.ReLU()
+        self.sigmoid = nn.Sigmoid()
     def forward(self, x):
         """
         2D Causal convolution.
@@ -209,9 +273,10 @@ class NonCausalConvBlock(nn.Module):
         Returns:
             [B, C, F, T]
         """
-        x = self.offset(x)
-        x = self.conv(x)
-        x = x[:, :, :, :-1]  # chomp size
+        x1 = self.conv1(x)
+        x2 = self.sigmoid(self.conv2(self.offset(x)))
+        x = x1 * x2       
+        x = x1[:, :, :, :-1]  # chomp size
         x = self.norm(x)
         x = self.activation(x)
         return x
@@ -220,7 +285,14 @@ class NonCausalTransConvBlock(nn.Module):
     def __init__(self, in_channels, out_channels, is_last=False, output_padding=(0, 0)):
         super().__init__()
         self.offset = ConvOffset2D(in_channels)
-        self.conv = nn.ConvTranspose2d(
+        self.conv1 = nn.ConvTranspose2d(
+            in_channels=in_channels,
+            out_channels=out_channels,
+            kernel_size=(3, 2),
+            stride=(2, 1),
+            output_padding=output_padding
+        )
+        self.conv2 = nn.ConvTranspose2d(
             in_channels=in_channels,
             out_channels=out_channels,
             kernel_size=(3, 2),
@@ -229,10 +301,10 @@ class NonCausalTransConvBlock(nn.Module):
         )
         self.norm = nn.BatchNorm2d(num_features=out_channels)
         if is_last:
-            self.activation = nn.ELU()
+            self.activation = nn.ReLU()
         else:
-            self.activation = nn.ELU()
-
+            self.activation = nn.ReLU()
+        self.sigmoid = nn.Sigmoid()
     def forward(self, x):
         """
         2D Causal convolution.
@@ -241,9 +313,10 @@ class NonCausalTransConvBlock(nn.Module):
         Returns:
             [B, C, F, T]
         """
-        x = self.offset(x)
-        x = self.conv(x)
-        x = x[:, :, :, :-1]  # chomp size
+        x1 = self.conv1(x)
+        x2 = self.sigmoid(self.conv2(self.offset(x)))
+        x = x1 * x2       
+        x = x1[:, :, :, :-1]  # chomp size
         x = self.norm(x)
         x = self.activation(x)
         return x
@@ -262,7 +335,7 @@ class NonCausalTransConvBlock1(nn.Module):
         if is_last:
             self.activation = nn.ReLU()
         else:
-            self.activation = nn.ELU()
+            self.activation = nn.ReLU()
 
     def forward(self, x):
         """
@@ -278,6 +351,39 @@ class NonCausalTransConvBlock1(nn.Module):
         x = self.activation(x)
         return x
 		
+class FeedForwardNetwork(nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+
+        self.conv1 = nn.Conv2d(in_channels=dim,
+                               out_channels=dim,
+                               kernel_size=1,
+                               stride=1)
+        self.conv2 = nn.Conv2d(in_channels=dim,
+                               out_channels=dim,
+                               kernel_size=1,
+                               stride=1)
+        self.conv3 = nn.Conv2d(in_channels=dim,
+                               out_channels=dim,
+                               kernel_size=1,
+                               stride=1)
+
+        self.layer1 = nn.Linear(251, 500)
+        self.sigmoid = nn.Sigmoid()
+        self.relu = nn.ReLU()
+        self.tanh = nn.Tanh()
+        self.dropout = nn.Dropout(0.5)
+        self.layer2 = nn.Linear(251, 251)
+
+    def forward(self, x):
+        out1 = self.tanh(self.conv1(x))
+        out2 = self.sigmoid(self.conv2(x))
+        x = out1 * out2
+        x = self.relu(x)
+        x = self.dropout(x)
+        x = self.layer2(x)
+        return x
+
 		
 class Model(nn.Module):
     """
@@ -305,7 +411,7 @@ class Model(nn.Module):
                                 nn.ReLU(),
                         )
         self.phase_conv1 = nn.Sequential(
-                                nn.Conv2d(2, channel_phase, 
+                                nn.Conv2d(3, channel_phase, 
                                         kernel_size=[3,5],
                                         padding=(1,2)
                                     ),
@@ -320,7 +426,7 @@ class Model(nn.Module):
                         nn.ReLU(),
                     )
         self.phase_conv2 = nn.Sequential(
-                        nn.Conv1d(3,8,kernel_size=[1,1])
+                        nn.Conv1d(2,8,kernel_size=[1,1])
                     )		
         # Encoder
         self.conv_block_1 = NonCausalConvBlock1(1, 16)
@@ -328,17 +434,18 @@ class Model(nn.Module):
         self.conv_block_3 = NonCausalConvBlock(32, 64)
         self.conv_block_4 = NonCausalConvBlock(64, 128)
         self.conv_block_5 = NonCausalConvBlock(128, 256)
-
-        self.atten = nn.Sequential(
-                    C_T_F_Attention(256),
-					#GLayerNorm2d(256)
-                 )
+        self.lstm_layer = nn.LSTM(input_size=251, hidden_size=251, num_layers=2, batch_first=True)
+        self.atten = C_T_F_Attention()
         self.norm = nn.LayerNorm([7, 251])
-				 
-        self.tran_conv_block_1 = NonCausalTransConvBlock(256 + 256, 128)
-        self.tran_conv_block_2 = NonCausalTransConvBlock(128 + 128, 64)
-        self.tran_conv_block_3 = NonCausalTransConvBlock(64 + 64, 32)
-        self.tran_conv_block_4 = NonCausalTransConvBlock(32 + 32, 16, output_padding=(1, 0))
+
+        self.ffn = FeedForwardNetwork(256)		
+
+        # self.SA_time = Axial_Layer(251, height_dim=True)
+        # self.SA_frequency = Axial_Layer(256, kernel_size=251, height_dim = False)				 
+        self.tran_conv_block_1 = NonCausalTransConvBlock1(256 + 256, 128)
+        self.tran_conv_block_2 = NonCausalTransConvBlock1(128 + 128, 64)
+        self.tran_conv_block_3 = NonCausalTransConvBlock1(64 + 64, 32)
+        self.tran_conv_block_4 = NonCausalTransConvBlock1(32 + 32, 16, output_padding=(1, 0))
         self.tran_conv_block_5 = NonCausalTransConvBlock1(16, 1, is_last=True)
         self.phase_conv5 = nn.Sequential(
                         nn.Conv1d(8, 2, kernel_size=(1,1))
@@ -377,15 +484,15 @@ class Model(nn.Module):
                                 cmp_spec[:,:,257:,:],
                                 ],
                                 1)
-        # mean = torch.mean(cmp_spec, [1, 2, 3], keepdim = True)
-        # std = torch.std(cmp_spec, [1, 2, 3], keepdim = True)
-        # cmp_spec = (cmp_spec - mean) / (std + 1e-8)    
+        mean = torch.mean(cmp_spec, [1, 2, 3], keepdim = True)
+        std = torch.std(cmp_spec, [1, 2, 3], keepdim = True)
+        cmp_spec = (cmp_spec - mean) / (std + 1e-8)    
         amp_spec = torch.sqrt(
                             torch.abs(cmp_spec[:,0])**2+
                             torch.abs(cmp_spec[:,1])**2,
                         )
+        phase_spec = torch.angle(cmp_spec)
         amp_spec = torch.unsqueeze(amp_spec, 1)
-        
         spec = self.amp_conv1(cmp_spec)
         e_1 = self.conv_block_1(spec)
         e_2 = self.conv_block_2(e_1)
@@ -393,32 +500,41 @@ class Model(nn.Module):
         e_4 = self.conv_block_4(e_3)
         e_5 = self.conv_block_5(e_4)  # [2, 256, 4, 200]
 
-        atten1 = self.norm(self.atten(e_5))# + e_5
-        atten2 = self.norm(self.atten(atten1))# + atten1
-        atten3 = self.norm(self.atten(atten2))# + atten2
+        # atten1 = self.norm(self.atten(e_5))# + e_5
+        # atten2 = self.norm(self.atten(atten1))# + atten1
+        # atten3 = self.norm(self.atten(atten2))# + atten2
+		
+        atten1 = self.norm(self.atten(e_5))
+        atten1 = self.ffn(atten1)
+        atten1 = self.norm(atten1)
+		
+        atten2 = self.norm(self.atten(atten1))
+        atten2 = self.ffn(atten2)
+        atten2 = self.norm(atten2)
 
+        atten3 = self.norm(self.atten(atten2))
+        atten3 = self.ffn(atten3)
+        atten3 = self.norm(atten3)
+        
+		
+        # batch_size, n_channels, n_f_bins, n_frame_size = e_5.shape
+
+        # # [2, 256, 4, 200] = [2, 1024, 200] => [2, 200, 1024]
+        # lstm_in = e_5.reshape(batch_size, n_channels * n_f_bins, n_frame_size)#.permute(0, 2, 1)
+        # lstm_out, _ = self.lstm_layer(lstm_in)  # [2, 200, 1024]
+        # lstm_out = lstm_out.reshape(batch_size, n_channels, n_f_bins, n_frame_size)  # [2, 256, 4, 200]
 		
         d_1 = self.tran_conv_block_1(torch.cat((atten3, e_5), 1))
         d_2 = self.tran_conv_block_2(torch.cat((d_1, e_4), 1))
         d_3 = self.tran_conv_block_3(torch.cat((d_2, e_3), 1))
         d_4 = self.tran_conv_block_4(torch.cat((d_3, e_2), 1))
-        d_5 = self.tran_conv_block_5(d_4)
-
-        spec = torch.transpose(d_5, 1,3)
-        #print(spec.size())
-        B, T, D, C = spec.size()
-        spec = torch.reshape(spec, [B, T, D*C])
-        spec = self.rnn(spec)[0]
-        spec = self.fcs(spec)
-        
-        spec = torch.reshape(spec, [B,T,D,1]) 
-        spec = torch.transpose(spec, 1,3)
+        d = self.tran_conv_block_5(d_4)
 
 	
-        phase_pro = self.phase_conv1(cmp_spec)			
-        phase_input = torch.cat([phase_pro, self.amp_conv2(d_5)], dim = 1)
+        phase_pro = self.phase_conv1(torch.cat([phase_spec, d], dim = 1))		
+        phase_input = torch.cat([phase_pro, self.amp_conv2(d)], dim = 1)
       
-        phase_input = self.phase_conv2(phase_input)	
+        phase_input = self.phase_conv2(phase_pro)	
         p1 = self.phase_conv3(phase_input)
         p1 = self.phase_conv4(p1)
 		
@@ -429,17 +545,16 @@ class Model(nn.Module):
         p3 = self.phase_conv4(p3)
 
         p5 = self.phase_conv5(p3)
-        p5 = phase_pro + p5
+        p5 = phase_spec + p5
         p5 = p5/(torch.sqrt(
                             torch.abs(p5[:,0])**2+
                             torch.abs(p5[:,1])**2)
                         +1e-8).unsqueeze(1)
-        est_spec = amp_spec * d_5 * p5
+        est_spec = d * p5
         est_spec = torch.cat([est_spec[:,0], est_spec[:,1]], 1)
         est_wav = self.istft(est_spec, None)
         est_wav = torch.squeeze(est_wav, 1)
         return est_spec, est_wav
-
     def loss(self, est, labels, mode='Mix'):
         '''
         mode == 'Mix'
@@ -508,9 +623,10 @@ def si_snr(s1, s2, eps=1e-8):
 
 def test_attention():
     torch.manual_seed(20)
-    inputs = torch.randn([10,256, 8, 251])
-    net = MultiHeadCrossAttention(256)
-    print(net(inputs).shape)
+    inputs = torch.randn(1, 64000)
+    net = Model()
+    a, d = net(inputs)
+    print(a.shape)
 
 if __name__ == '__main__':
     test_attention()
